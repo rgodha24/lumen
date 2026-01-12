@@ -13,6 +13,7 @@ use crossterm::{
 };
 use ratatui::prelude::*;
 
+use super::annotation::{AnnotationEditor, AnnotationEditorResult};
 use super::diff_algo::{compute_side_by_side, find_hunk_starts};
 use super::git::{
     get_current_branch, load_file_diffs, load_pr_file_diffs, load_single_commit_diffs,
@@ -22,7 +23,6 @@ use super::render::{
     render_diff, render_empty_state, truncate_path, FilePickerItem, KeyBind, KeyBindSection, Modal,
     ModalContent, ModalFileStatus, ModalResult,
 };
-use super::annotation::{AnnotationEditor, AnnotationEditorResult};
 use super::state::{adjust_scroll_for_hunk, adjust_scroll_to_line, AppState, PendingKey};
 use super::theme;
 use super::types::{ChangeType, DiffFullscreen, FileStatus, FocusedPanel, SidebarItem};
@@ -31,7 +31,7 @@ use super::{
     fetch_viewed_files, mark_file_as_viewed_async, unmark_file_as_viewed_async, DiffOptions, PrInfo,
 };
 use crate::commit_reference::CommitReference;
-use crate::vcs::{StackedCommitInfo, VcsBackend};
+use crate::vcs::{GitBackend, StackedCommitInfo, VcsBackend};
 
 /// Navigate to a different commit in stacked mode.
 /// Returns true if navigation was successful.
@@ -157,7 +157,10 @@ fn run_app_internal(
 
     // Set diff reference for annotation export context
     let diff_ref_str = if let Some(pr) = &pr_info {
-        Some(format!("PR #{} ({}...{})", pr.number, pr.base_ref, pr.head_ref))
+        Some(format!(
+            "PR #{} ({}...{})",
+            pr.number, pr.base_ref, pr.head_ref
+        ))
     } else {
         options.reference.as_ref().map(|r| match r {
             CommitReference::Single(s) => s.clone(),
@@ -238,10 +241,7 @@ fn run_app_internal(
                 .search_state
                 .update_matches(&side_by_side, state.diff_fullscreen);
             let branch_fallback = get_current_branch(backend);
-            let commit_ref = state
-                .diff_reference
-                .as_deref()
-                .unwrap_or(&branch_fallback);
+            let commit_ref = state.diff_reference.as_deref().unwrap_or(&branch_fallback);
             terminal.draw(|frame| {
                 render_diff(
                     frame,
@@ -375,7 +375,10 @@ fn run_app_internal(
                                     }
                                     active_modal = None;
                                 }
-                                ModalResult::AnnotationJump { file_index, hunk_index } => {
+                                ModalResult::AnnotationJump {
+                                    file_index,
+                                    hunk_index,
+                                } => {
                                     // Jump to the file and hunk
                                     state.select_file(file_index);
                                     state.focused_hunk = Some(hunk_index);
@@ -397,15 +400,20 @@ fn run_app_internal(
                                     }
                                     active_modal = None;
                                 }
-                                ModalResult::AnnotationEdit { file_index, hunk_index } => {
+                                ModalResult::AnnotationEdit {
+                                    file_index,
+                                    hunk_index,
+                                } => {
                                     // Close modal and open annotation editor for editing
-                                    if let Some(ann) = state.get_annotation(file_index, hunk_index) {
+                                    if let Some(ann) = state.get_annotation(file_index, hunk_index)
+                                    {
                                         let editor = AnnotationEditor::new(
                                             file_index,
                                             hunk_index,
                                             ann.filename.clone(),
                                             ann.line_range,
-                                        ).with_content(&ann.content, ann.created_at);
+                                        )
+                                        .with_content(&ann.content, ann.created_at);
                                         annotation_editor = Some(editor);
                                         // Also jump to the hunk
                                         state.select_file(file_index);
@@ -413,7 +421,10 @@ fn run_app_internal(
                                     }
                                     active_modal = None;
                                 }
-                                ModalResult::AnnotationDelete { file_index, hunk_index } => {
+                                ModalResult::AnnotationDelete {
+                                    file_index,
+                                    hunk_index,
+                                } => {
                                     state.remove_annotation(file_index, hunk_index);
                                     // Refresh the modal if there are still annotations
                                     if !state.annotations.is_empty() {
@@ -423,7 +434,11 @@ fn run_app_internal(
                                             .iter()
                                             .map(format_annotation_preview)
                                             .collect();
-                                        active_modal = Some(Modal::annotations("Annotations", items, sorted_annotations));
+                                        active_modal = Some(Modal::annotations(
+                                            "Annotations",
+                                            items,
+                                            sorted_annotations,
+                                        ));
                                     } else {
                                         active_modal = None;
                                     }
@@ -446,13 +461,83 @@ fn run_app_internal(
                                         Err(e) => {
                                             // Set error message on the modal
                                             if let Some(ref mut modal) = active_modal {
-                                                if let ModalContent::Annotations { error_message, export_input, .. } = &mut modal.content {
-                                                    *error_message = Some(format!("Failed to write: {}", e));
+                                                if let ModalContent::Annotations {
+                                                    error_message,
+                                                    export_input,
+                                                    ..
+                                                } = &mut modal.content
+                                                {
+                                                    *error_message =
+                                                        Some(format!("Failed to write: {}", e));
                                                     *export_input = None; // Close input, keep modal open
                                                 }
                                             }
                                         }
                                     }
+                                }
+                                ModalResult::CommitConfirmed(message) => {
+                                    // Get the current working directory for GitBackend
+                                    let cwd = std::env::current_dir().unwrap_or_default();
+                                    match GitBackend::new(&cwd) {
+                                        Ok(git) => {
+                                            // Collect file paths to stage
+                                            let file_paths: Vec<String> = state
+                                                .viewed_files
+                                                .iter()
+                                                .filter_map(|&idx| {
+                                                    state
+                                                        .file_diffs
+                                                        .get(idx)
+                                                        .map(|f| f.filename.clone())
+                                                })
+                                                .collect();
+
+                                            // Stage the viewed files
+                                            let paths: Vec<std::path::PathBuf> = file_paths
+                                                .iter()
+                                                .map(std::path::PathBuf::from)
+                                                .collect();
+                                            let path_refs: Vec<&std::path::Path> =
+                                                paths.iter().map(|p| p.as_path()).collect();
+
+                                            if let Err(e) = git.stage_files(&path_refs) {
+                                                active_modal = Some(Modal::info(
+                                                    "Staging Failed",
+                                                    format!("{}", e),
+                                                ));
+                                                continue;
+                                            }
+
+                                            // Create the commit
+                                            match git.commit(&message) {
+                                                Ok(sha) => {
+                                                    // Clear viewed files after successful commit
+                                                    state.viewed_files.clear();
+                                                    active_modal = Some(Modal::info(
+                                                        "Committed",
+                                                        format!(
+                                                            "Created commit {}\n\n{}",
+                                                            &sha[..7.min(sha.len())],
+                                                            message
+                                                        ),
+                                                    ));
+                                                }
+                                                Err(e) => {
+                                                    active_modal = Some(Modal::info(
+                                                        "Commit Failed",
+                                                        format!("{}", e),
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            active_modal = Some(Modal::info(
+                                                "Error",
+                                                format!("Failed to open git repository: {}", e),
+                                            ));
+                                        }
+                                    }
+                                    continue;
                                 }
                                 ModalResult::Dismissed | ModalResult::Selected(_, _) => {
                                     active_modal = None;
@@ -480,7 +565,9 @@ fn run_app_internal(
                                 // Left arrow click (first 4 columns to cover " < ")
                                 if mouse.column < 4 && state.current_commit_index > 0 {
                                     let new_index = state.current_commit_index - 1;
-                                    navigate_stacked_commit(&mut state, new_index, &options, backend);
+                                    navigate_stacked_commit(
+                                        &mut state, new_index, &options, backend,
+                                    );
                                 }
                                 // Right arrow click (last 4 columns to cover " > ")
                                 else if mouse.column >= term_size.width.saturating_sub(4)
@@ -488,7 +575,9 @@ fn run_app_internal(
                                         < state.stacked_commits.len().saturating_sub(1)
                                 {
                                     let new_index = state.current_commit_index + 1;
-                                    navigate_stacked_commit(&mut state, new_index, &options, backend);
+                                    navigate_stacked_commit(
+                                        &mut state, new_index, &options, backend,
+                                    );
                                 }
                             } else if state.show_sidebar
                                 && mouse.column < sidebar_width
@@ -1098,7 +1187,9 @@ fn run_app_internal(
                                 );
 
                                 // If editing existing, pre-fill content
-                                let editor = if let Some(ann) = state.get_annotation(file_index, hunk_index) {
+                                let editor = if let Some(ann) =
+                                    state.get_annotation(file_index, hunk_index)
+                                {
                                     editor.with_content(&ann.content, ann.created_at)
                                 } else {
                                     editor
@@ -1116,7 +1207,11 @@ fn run_app_internal(
                                     .iter()
                                     .map(format_annotation_preview)
                                     .collect();
-                                active_modal = Some(Modal::annotations("Annotations", items, sorted_annotations));
+                                active_modal = Some(Modal::annotations(
+                                    "Annotations",
+                                    items,
+                                    sorted_annotations,
+                                ));
                             }
                         }
                         KeyCode::Char('r') => {
@@ -1230,6 +1325,34 @@ fn run_app_internal(
                                 );
                             }
                         }
+                        KeyCode::Char('c') => {
+                            // Commit viewed files - only supported for git
+                            if backend.name() != "git" {
+                                // Show error for non-git backends
+                                active_modal = Some(Modal::info(
+                                    "Not Supported",
+                                    "Commit from diff view is only supported for git repositories",
+                                ));
+                            } else if state.viewed_files.is_empty() {
+                                active_modal = Some(Modal::info(
+                                    "No Files",
+                                    "No files marked as viewed to commit",
+                                ));
+                            } else {
+                                // Collect viewed file names
+                                let files_to_commit: Vec<String> = state
+                                    .viewed_files
+                                    .iter()
+                                    .filter_map(|&idx| {
+                                        state.file_diffs.get(idx).map(|f| f.filename.clone())
+                                    })
+                                    .collect();
+                                active_modal = Some(Modal::commit_input(
+                                    "Commit Viewed Files",
+                                    files_to_commit,
+                                ));
+                            }
+                        }
                         KeyCode::Char('?') => {
                             active_modal = Some(Modal::keybindings(
                                 "Keybindings",
@@ -1278,6 +1401,10 @@ fn run_app_internal(
                                                 description: "Open file in browser (PR mode)",
                                             },
                                             KeyBind {
+                                                key: "c",
+                                                description: "Commit viewed files (git only)",
+                                            },
+                                            KeyBind {
                                                 key: "ctrl+l / ctrl+h",
                                                 description: "Next / prev commit (stacked)",
                                             },
@@ -1300,7 +1427,8 @@ fn run_app_internal(
                                             },
                                             KeyBind {
                                                 key: "enter",
-                                                description: "Open file in diff view / toggle directory",
+                                                description:
+                                                    "Open file in diff view / toggle directory",
                                             },
                                             KeyBind {
                                                 key: "space",
