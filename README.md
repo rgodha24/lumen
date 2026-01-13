@@ -186,7 +186,7 @@ Priority: CLI flag > config file > `LUMEN_THEME` env var > OS auto-detect.
 
 Keybindings in the diff viewer:
 - `j/k` or arrow keys: Navigate
-- `{/}`: Jump between hunks
+- `{`/`}` or `p`/`n`: Jump between hunks
 - `tab`: Toggle sidebar
 - `space`: Mark file as viewed
 - `e`: Open file in editor
