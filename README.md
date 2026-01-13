@@ -195,7 +195,7 @@ Annotations can be copied to clipboard or exported to a file for sharing.
 #### Keybindings
 
 - `j/k` or arrow keys: Navigate
-- `{/}`: Jump between hunks
+- `{`/`}` or `p`/`n`: Jump between hunks
 - `tab`: Toggle sidebar
 - `space`: Mark file as viewed
 - `e`: Open file in editor

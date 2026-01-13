@@ -130,6 +130,68 @@ fn sync_viewed_files_from_github(pr_info: &PrInfo, state: &mut AppState) {
     }
 }
 
+fn focus_next_hunk(state: &mut AppState, visible_height: usize, max_scroll: usize) {
+    if state.file_diffs.is_empty() {
+        return;
+    }
+
+    let diff = &state.file_diffs[state.current_file];
+    let side_by_side = compute_side_by_side(
+        &diff.old_content,
+        &diff.new_content,
+        state.settings.tab_width,
+    );
+    let hunks = find_hunk_starts(&side_by_side);
+    if hunks.is_empty() {
+        return;
+    }
+
+    let current_hunk = state.focused_hunk.unwrap_or(0);
+    let next_hunk = if state.focused_hunk.is_none() {
+        hunks
+            .iter()
+            .position(|&h| h > state.scroll as usize + 5)
+            .unwrap_or(0)
+    } else {
+        (current_hunk + 1).min(hunks.len().saturating_sub(1))
+    };
+
+    state.focused_hunk = Some(next_hunk);
+    state.scroll =
+        adjust_scroll_for_hunk(hunks[next_hunk], state.scroll, visible_height, max_scroll);
+}
+
+fn focus_prev_hunk(state: &mut AppState, visible_height: usize, max_scroll: usize) {
+    if state.file_diffs.is_empty() {
+        return;
+    }
+
+    let diff = &state.file_diffs[state.current_file];
+    let side_by_side = compute_side_by_side(
+        &diff.old_content,
+        &diff.new_content,
+        state.settings.tab_width,
+    );
+    let hunks = find_hunk_starts(&side_by_side);
+    if hunks.is_empty() {
+        return;
+    }
+
+    let current_hunk = state.focused_hunk.unwrap_or(hunks.len());
+    let prev_hunk = if state.focused_hunk.is_none() {
+        hunks
+            .iter()
+            .rposition(|&h| (h as u16) < state.scroll.saturating_sub(5))
+            .unwrap_or(hunks.len().saturating_sub(1))
+    } else {
+        current_hunk.saturating_sub(1)
+    };
+
+    state.focused_hunk = Some(prev_hunk);
+    state.scroll =
+        adjust_scroll_for_hunk(hunks[prev_hunk], state.scroll, visible_height, max_scroll);
+}
+
 fn run_app_internal(
     options: DiffOptions,
     pr_info: Option<PrInfo>,
@@ -1074,62 +1136,16 @@ fn run_app_internal(
                             state.scroll = state.scroll.saturating_sub(20);
                         }
                         KeyCode::Char('}') => {
-                            if !state.file_diffs.is_empty() {
-                                let diff = &state.file_diffs[state.current_file];
-                                let side_by_side = compute_side_by_side(
-                                    &diff.old_content,
-                                    &diff.new_content,
-                                    state.settings.tab_width,
-                                );
-                                let hunks = find_hunk_starts(&side_by_side);
-                                let current_hunk = state.focused_hunk.unwrap_or(0);
-                                let next_hunk = if state.focused_hunk.is_none() {
-                                    hunks
-                                        .iter()
-                                        .position(|&h| h > state.scroll as usize + 5)
-                                        .unwrap_or(0)
-                                } else {
-                                    (current_hunk + 1).min(hunks.len().saturating_sub(1))
-                                };
-                                if !hunks.is_empty() {
-                                    state.focused_hunk = Some(next_hunk);
-                                    state.scroll = adjust_scroll_for_hunk(
-                                        hunks[next_hunk],
-                                        state.scroll,
-                                        visible_height,
-                                        max_scroll,
-                                    );
-                                }
-                            }
+                            focus_next_hunk(&mut state, visible_height, max_scroll);
                         }
                         KeyCode::Char('{') => {
-                            if !state.file_diffs.is_empty() {
-                                let diff = &state.file_diffs[state.current_file];
-                                let side_by_side = compute_side_by_side(
-                                    &diff.old_content,
-                                    &diff.new_content,
-                                    state.settings.tab_width,
-                                );
-                                let hunks = find_hunk_starts(&side_by_side);
-                                let current_hunk = state.focused_hunk.unwrap_or(hunks.len());
-                                let prev_hunk = if state.focused_hunk.is_none() {
-                                    hunks
-                                        .iter()
-                                        .rposition(|&h| (h as u16) < state.scroll.saturating_sub(5))
-                                        .unwrap_or(hunks.len().saturating_sub(1))
-                                } else {
-                                    current_hunk.saturating_sub(1)
-                                };
-                                if !hunks.is_empty() {
-                                    state.focused_hunk = Some(prev_hunk);
-                                    state.scroll = adjust_scroll_for_hunk(
-                                        hunks[prev_hunk],
-                                        state.scroll,
-                                        visible_height,
-                                        max_scroll,
-                                    );
-                                }
-                            }
+                            focus_prev_hunk(&mut state, visible_height, max_scroll);
+                        }
+                        KeyCode::Char('n') if !state.search_state.has_query() => {
+                            focus_next_hunk(&mut state, visible_height, max_scroll);
+                        }
+                        KeyCode::Char('p') => {
+                            focus_prev_hunk(&mut state, visible_height, max_scroll);
                         }
                         KeyCode::Char('i') => {
                             // Add annotation to focused hunk
@@ -1452,7 +1468,7 @@ fn run_app_internal(
                                                 description: "Scroll to top / bottom",
                                             },
                                             KeyBind {
-                                                key: "{ / }",
+                                                key: "p / n or { / }",
                                                 description: "Focus prev / next hunk",
                                             },
                                             KeyBind {
