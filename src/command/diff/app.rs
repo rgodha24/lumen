@@ -130,9 +130,18 @@ fn sync_viewed_files_from_github(pr_info: &PrInfo, state: &mut AppState) {
     }
 }
 
-fn focus_next_hunk(state: &mut AppState, visible_height: usize, max_scroll: usize) {
+enum HunkNavigationResult {
+    Moved,
+    AtBoundary,
+}
+
+fn focus_next_hunk(
+    state: &mut AppState,
+    visible_height: usize,
+    max_scroll: usize,
+) -> HunkNavigationResult {
     if state.file_diffs.is_empty() {
-        return;
+        return HunkNavigationResult::AtBoundary;
     }
 
     let diff = &state.file_diffs[state.current_file];
@@ -143,10 +152,16 @@ fn focus_next_hunk(state: &mut AppState, visible_height: usize, max_scroll: usiz
     );
     let hunks = find_hunk_starts(&side_by_side);
     if hunks.is_empty() {
-        return;
+        return HunkNavigationResult::AtBoundary;
     }
 
     let current_hunk = state.focused_hunk.unwrap_or(0);
+    let at_last = state.focused_hunk == Some(hunks.len().saturating_sub(1));
+
+    if at_last {
+        return HunkNavigationResult::AtBoundary;
+    }
+
     let next_hunk = if state.focused_hunk.is_none() {
         hunks
             .iter()
@@ -159,11 +174,16 @@ fn focus_next_hunk(state: &mut AppState, visible_height: usize, max_scroll: usiz
     state.focused_hunk = Some(next_hunk);
     state.scroll =
         adjust_scroll_for_hunk(hunks[next_hunk], state.scroll, visible_height, max_scroll);
+    HunkNavigationResult::Moved
 }
 
-fn focus_prev_hunk(state: &mut AppState, visible_height: usize, max_scroll: usize) {
+fn focus_prev_hunk(
+    state: &mut AppState,
+    visible_height: usize,
+    max_scroll: usize,
+) -> HunkNavigationResult {
     if state.file_diffs.is_empty() {
-        return;
+        return HunkNavigationResult::AtBoundary;
     }
 
     let diff = &state.file_diffs[state.current_file];
@@ -174,7 +194,13 @@ fn focus_prev_hunk(state: &mut AppState, visible_height: usize, max_scroll: usiz
     );
     let hunks = find_hunk_starts(&side_by_side);
     if hunks.is_empty() {
-        return;
+        return HunkNavigationResult::AtBoundary;
+    }
+
+    let at_first = state.focused_hunk == Some(0);
+
+    if at_first {
+        return HunkNavigationResult::AtBoundary;
     }
 
     let current_hunk = state.focused_hunk.unwrap_or(hunks.len());
@@ -190,6 +216,74 @@ fn focus_prev_hunk(state: &mut AppState, visible_height: usize, max_scroll: usiz
     state.focused_hunk = Some(prev_hunk);
     state.scroll =
         adjust_scroll_for_hunk(hunks[prev_hunk], state.scroll, visible_height, max_scroll);
+    HunkNavigationResult::Moved
+}
+
+fn navigate_to_next_file(state: &mut AppState, sidebar_visible_height: usize) -> bool {
+    let mut next = state.sidebar_selected + 1;
+    while next < state.sidebar_items.len() {
+        if let SidebarItem::File { file_index, .. } = &state.sidebar_items[next] {
+            state.sidebar_selected = next;
+            state.select_file(*file_index);
+            if state.sidebar_selected >= state.sidebar_scroll + sidebar_visible_height {
+                state.sidebar_scroll = state
+                    .sidebar_selected
+                    .saturating_sub(sidebar_visible_height)
+                    + 1;
+            } else if state.sidebar_selected < state.sidebar_scroll {
+                state.sidebar_scroll = state.sidebar_selected;
+            }
+            return true;
+        }
+        next += 1;
+    }
+    false
+}
+
+fn navigate_to_prev_file(state: &mut AppState, visible_height: usize) -> bool {
+    if state.sidebar_selected == 0 {
+        return false;
+    }
+
+    let mut prev = state.sidebar_selected - 1;
+    loop {
+        if let SidebarItem::File { file_index, .. } = &state.sidebar_items[prev] {
+            state.sidebar_selected = prev;
+            let file_idx = *file_index;
+            state.select_file(file_idx);
+
+            // Go to the last hunk of the previous file
+            let diff = &state.file_diffs[file_idx];
+            let side_by_side = compute_side_by_side(
+                &diff.old_content,
+                &diff.new_content,
+                state.settings.tab_width,
+            );
+            let hunks = find_hunk_starts(&side_by_side);
+            if !hunks.is_empty() {
+                let last_hunk_idx = hunks.len() - 1;
+                state.focused_hunk = Some(last_hunk_idx);
+                let total_lines = side_by_side.len();
+                let new_max_scroll = total_lines.saturating_sub(visible_height.saturating_sub(5));
+                state.scroll = adjust_scroll_for_hunk(
+                    hunks[last_hunk_idx],
+                    state.scroll,
+                    visible_height,
+                    new_max_scroll,
+                );
+            }
+
+            if state.sidebar_selected < state.sidebar_scroll {
+                state.sidebar_scroll = state.sidebar_selected;
+            }
+            return true;
+        }
+        if prev == 0 {
+            break;
+        }
+        prev -= 1;
+    }
+    false
 }
 
 fn run_app_internal(
@@ -757,7 +851,7 @@ fn run_app_internal(
                         }
                         KeyCode::Char('q') | KeyCode::Esc => break 'main,
                         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                            break 'main
+                            break 'main;
                         }
                         KeyCode::Char('1') => {
                             state.focused_panel = FocusedPanel::Sidebar;
@@ -1142,10 +1236,29 @@ fn run_app_internal(
                             focus_prev_hunk(&mut state, visible_height, max_scroll);
                         }
                         KeyCode::Char('n') if !state.search_state.has_query() => {
-                            focus_next_hunk(&mut state, visible_height, max_scroll);
+                            if let HunkNavigationResult::AtBoundary =
+                                focus_next_hunk(&mut state, visible_height, max_scroll)
+                            {
+                                // Mark current file as viewed and move to next file
+                                let current_file = state.current_file;
+                                if !state.viewed_files.contains(&current_file) {
+                                    let filename = state.file_diffs[current_file].filename.clone();
+                                    state.viewed_files.insert(current_file);
+                                    if let Some(ref pr) = pr_info {
+                                        mark_file_as_viewed_async(pr, &filename);
+                                    }
+                                }
+                                let sidebar_visible_height =
+                                    terminal.size()?.height.saturating_sub(5) as usize;
+                                navigate_to_next_file(&mut state, sidebar_visible_height);
+                            }
                         }
                         KeyCode::Char('p') => {
-                            focus_prev_hunk(&mut state, visible_height, max_scroll);
+                            if let HunkNavigationResult::AtBoundary =
+                                focus_prev_hunk(&mut state, visible_height, max_scroll)
+                            {
+                                navigate_to_prev_file(&mut state, visible_height);
+                            }
                         }
                         KeyCode::Char('i') => {
                             // Add annotation to focused hunk
