@@ -3,10 +3,6 @@ use std::time::SystemTime;
 
 use crate::command::diff::diff_algo::{compute_side_by_side, find_hunk_starts};
 
-/// Maximum number of diff lines to include inline when exporting annotations.
-/// Hunks with more lines than this will not include the diff content in the export
-/// to keep the output concise.
-const MAX_EXPORT_DIFF_LINES: usize = 5;
 use crate::command::diff::search::SearchState;
 use crate::command::diff::types::{
     build_file_tree, ChangeType, DiffFullscreen, DiffViewSettings, FileDiff, FocusedPanel,
@@ -526,102 +522,94 @@ impl AppState {
             .retain(|a| !(a.file_index == file_index && a.hunk_index == hunk_index));
     }
 
-    /// Format all annotations for export with full diff context
+    /// Format all annotations for export with viewed files and grouped comments
     pub fn format_annotations_for_export(&self) -> String {
+        use std::fmt::Write;
+
         let mut result = String::new();
 
-        // Add header with diff reference context
-        if let Some(ref reference) = self.diff_reference {
-            result.push_str(&format!("Annotations for diff: {}\n\n", reference));
+        writeln!(result, "after reviewing the following files:\n").unwrap();
+
+        let mut viewed_files_list: Vec<_> = self
+            .viewed_files
+            .iter()
+            .filter_map(|&idx| self.file_diffs.get(idx).map(|f| f.filename.as_str()))
+            .collect();
+        viewed_files_list.sort();
+
+        for filename in &viewed_files_list {
+            writeln!(result, "- {}", filename).unwrap();
         }
 
-        let annotations_text = self
-            .annotations
-            .iter()
-            .map(|a| {
-                // Try to get the diff content for this hunk
-                let diff_content = self.get_hunk_diff_content(a.file_index, a.hunk_index);
+        if viewed_files_list.is_empty() {
+            writeln!(result, "(no files marked as viewed)").unwrap();
+        }
 
-                let mut output = format!("- {}", a.filename);
+        writeln!(result, "\ni have the following comments:\n").unwrap();
 
-                // Add line info based on what we have
-                if let Some((old_range, new_range, _)) = &diff_content {
-                    // Format line ranges intelligently
+        // Group annotations by filename
+        let mut annotations_by_file: std::collections::HashMap<_, Vec<_>> =
+            std::collections::HashMap::new();
+
+        for annotation in &self.annotations {
+            annotations_by_file
+                .entry(annotation.filename.as_str())
+                .or_default()
+                .push(annotation);
+        }
+
+        // Sort filenames for consistent output
+        let mut filenames: Vec<_> = annotations_by_file.keys().collect();
+        filenames.sort();
+
+        for filename in filenames {
+            writeln!(result, "`{}`", filename).unwrap();
+
+            let annotations = &annotations_by_file[filename];
+            // Sort annotations by line range within the file
+            let mut sorted_annotations: Vec<_> = annotations.iter().collect();
+            sorted_annotations.sort_by_key(|a| a.line_range.0);
+
+            for annotation in sorted_annotations {
+                // Get actual line range from diff content
+                let diff_content =
+                    self.get_hunk_diff_content(annotation.file_index, annotation.hunk_index);
+
+                let line_range_str = if let Some((old_range, new_range, _)) = &diff_content {
                     match (old_range, new_range) {
-                        (Some(_), Some((new_start, new_end))) => {
-                            // Modified: show new file lines
+                        (_, Some((new_start, new_end))) => {
                             if new_start == new_end {
-                                output.push_str(&format!(":L{}", new_start));
+                                format!("L{}", new_start)
                             } else {
-                                output.push_str(&format!(":L{}-{}", new_start, new_end));
+                                format!("L{}-{}", new_start, new_end)
                             }
                         }
                         (Some((old_start, old_end)), None) => {
-                            // Pure deletion: indicate where it was in the base
-                            let base_ref = self
-                                .diff_reference
-                                .as_ref()
-                                .and_then(|r| {
-                                    // Check for three-dot range first, then two-dot, then single ref
-                                    if let Some((base, _)) = r.split_once("...") {
-                                        Some(base)
-                                    } else if let Some((base, _)) = r.split_once("..") {
-                                        Some(base)
-                                    } else {
-                                        Some(r.as_str())
-                                    }
-                                })
-                                .unwrap_or("base");
+                            // Pure deletion
                             if old_start == old_end {
-                                output.push_str(&format!(
-                                    " (deleted from {}:L{})",
-                                    base_ref, old_start
-                                ));
+                                format!("L{} (deleted)", old_start)
                             } else {
-                                output.push_str(&format!(
-                                    " (deleted from {}:L{}-{})",
-                                    base_ref, old_start, old_end
-                                ));
-                            }
-                        }
-                        (None, Some((new_start, new_end))) => {
-                            // Pure addition
-                            if new_start == new_end {
-                                output.push_str(&format!(":L{}", new_start));
-                            } else {
-                                output.push_str(&format!(":L{}-{}", new_start, new_end));
+                                format!("L{}-{} (deleted)", old_start, old_end)
                             }
                         }
                         (None, None) => {
-                            // Fallback to stored line_range
-                            output.push_str(&format!(":L{}-{}", a.line_range.0, a.line_range.1));
+                            format!("L{}-{}", annotation.line_range.0, annotation.line_range.1)
                         }
                     }
                 } else {
-                    // Fallback if we can't compute diff
-                    output.push_str(&format!(":L{}-{}", a.line_range.0, a.line_range.1));
-                }
+                    format!("L{}-{}", annotation.line_range.0, annotation.line_range.1)
+                };
 
-                output.push('\n');
+                writeln!(result, "- {}: {}", line_range_str, annotation.content).unwrap();
+            }
+        }
 
-                // Add diff content if available and small enough
-                if let Some((_, _, lines)) = diff_content {
-                    let line_count = lines.lines().count();
-                    if line_count > 0 && line_count <= MAX_EXPORT_DIFF_LINES {
-                        output.push_str("```diff\n");
-                        output.push_str(&lines);
-                        output.push_str("```\n");
-                    }
-                }
+        if self.annotations.is_empty() {
+            writeln!(result, "(no comments)").unwrap();
+        }
 
-                // Add the annotation
-                output.push_str(&format!("comment: {}\n", a.content));
-                output
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        writeln!(result, "\nplease address these comments").unwrap();
 
-        result.push_str(&annotations_text);
         result
     }
 

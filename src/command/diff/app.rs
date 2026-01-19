@@ -600,11 +600,8 @@ fn run_app_internal(
                                     }
                                 }
                                 ModalResult::AnnotationCopyAll => {
-                                    // Copy all annotations to clipboard
                                     let formatted = state.format_annotations_for_export();
-                                    if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                        let _ = clipboard.set_text(&formatted);
-                                    }
+                                    let _ = super::clipboard::copy_osc52(&formatted);
                                     active_modal = None;
                                 }
                                 ModalResult::AnnotationExport(filename) => {
@@ -1348,10 +1345,9 @@ fn run_app_internal(
                         }
                         KeyCode::Char('y') => {
                             if !state.file_diffs.is_empty() {
-                                if let Ok(mut clipboard) = arboard::Clipboard::new() {
-                                    let _ = clipboard
-                                        .set_text(&state.file_diffs[state.current_file].filename);
-                                }
+                                let _ = super::clipboard::copy_osc52(
+                                    &state.file_diffs[state.current_file].filename,
+                                );
                             }
                         }
                         KeyCode::Char('e') => {

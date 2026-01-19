@@ -1,5 +1,6 @@
 mod annotation;
 mod app;
+mod clipboard;
 mod context;
 mod diff_algo;
 pub mod git;
