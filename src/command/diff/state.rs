@@ -528,6 +528,13 @@ impl AppState {
 
         let mut result = String::new();
 
+        // Include what we are viewing
+        let viewing_context = match &self.diff_reference {
+            Some(reference) => format!("(while viewing commit '{}')", reference),
+            None => "(while viewing unstaged changes)".to_string(),
+        };
+        writeln!(result, "{}\n", viewing_context).unwrap();
+
         writeln!(result, "after reviewing the following files:\n").unwrap();
 
         let mut viewed_files_list: Vec<_> = self
